@@ -18,7 +18,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 // --- Configuration ---
-const int GRID_RESOLUTION = 512;
+const int GRID_RESOLUTION = 32;
 
 // --- Global Variables ---
 float yaw   = -90.0f;
@@ -31,6 +31,7 @@ bool isDragging = false;
 // Toggles
 bool showVoxels = false;
 bool useOrtho = false;
+bool showWireframe = false; 
 
 // --- Structures ---
 struct Vec3 {
@@ -261,7 +262,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_V) { showVoxels = !showVoxels; std::cout << "Mode: " << (showVoxels ? "Voxels" : "Mesh") << std::endl; }
         if (key == GLFW_KEY_O) { useOrtho = !useOrtho; std::cout << "Projection: " << (useOrtho ? "Orthographic" : "Perspective") << std::endl; }
-        
+        if (key == GLFW_KEY_W) { showWireframe = !showWireframe; std::cout << "Wireframe: " << (showWireframe ? "ON" : "OFF") << std::endl; }
         // --- NEW CONTROLS ---
         if (key == GLFW_KEY_E) { saveAnalysisToFile("geometry_exact.txt", false); } // Exact
         if (key == GLFW_KEY_F) { saveAnalysisToFile("geometry_sdf.txt", true); }    // SDF
@@ -270,36 +271,57 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
 }
 
-// --- Shaders ---
+// --- Vertex Shader ---
 const char* vertexShaderSource = R"(
     #version 330 core
     layout (location = 0) in vec3 aPos;
     layout (location = 1) in vec3 aNormal;
-    out vec3 Normal; out vec3 FragPos;
+    out vec3 Normal; 
+    out vec3 FragPos;
     uniform mat4 model; uniform mat4 view; uniform mat4 projection;
     void main() {
         FragPos = vec3(model * vec4(aPos, 1.0));
+        // Pass the normal to the fragment shader
         Normal = mat3(transpose(inverse(model))) * aNormal;  
         gl_Position = projection * view * vec4(FragPos, 1.0);
     }
 )";
+
+// --- Fragment Shader ---
 const char* fragmentShaderSource = R"(
     #version 330 core
     out vec4 FragColor;
-    in vec3 Normal; in vec3 FragPos;
+    in vec3 Normal; 
+    in vec3 FragPos;
     uniform vec3 objectColor;
+    uniform vec3 viewPos; 
     void main() {
+        // 1. Fix potentially broken or inverted normals
         vec3 norm = normalize(Normal);
-        vec3 lightDir = normalize(vec3(0.5, 1.0, 2.0));
-        float diff = max(dot(norm, lightDir), 0.0);
-        vec3 ambient = 0.3 * objectColor;
-        vec3 diffuse = diff * objectColor;
-        FragColor = vec4(ambient + diffuse, 1.0);
+        vec3 viewDir = normalize(viewPos - FragPos);
+        
+        // If the normal is facing away from the camera, flip it (Double-Sided Lighting)
+        if (dot(norm, viewDir) < 0.0) norm = -norm;
+
+        // 2. High-Intensity Headlamp
+        float diff = max(dot(norm, viewDir), 0.0);
+        
+        // 3. Ambient + Diffuse (Bosted for visibility)
+        vec3 ambient = 0.5 * objectColor;  // 50% base brightness
+        vec3 diffuse = diff * objectColor * 1.2; // 120% directional brightness
+        
+        vec3 result = ambient + diffuse;
+        
+        // 4. Final Clamp to ensure colors don't wash out
+        FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
     }
 )";
 
 int main() {
-    std::string filename = "model.stl";
+    // Change the name of the file to whatever you want to , and then run the command "g++ -std=c++17 main.cpp -o StlViewer -I/opt/homebrew/include -L/opt/homebrew/lib -lglfw -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo"
+    // Post which you can run the viewer with "./StlViewer" in the terminal. Make sure to have the STL file in the same directory as the executable, or provide a relative/absolute path to it.
+    // The above command assumes you have GLFW installed via Homebrew on a Mac. If you're on Windows or Linux, the compilation command and library linking will differ.
+    std::string filename = "Mar_Polish.stl";
     std::cout << "Loading " << filename << "..." << std::endl;
     loadBinarySTL(filename);
 
@@ -307,6 +329,7 @@ int main() {
     std::cout << "       CONTROLS & SHORTCUTS             " << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << " [V] Toggle Voxel/Mesh View" << std::endl;
+    std::cout << " [W] Toggle Wireframe" << std::endl;
     std::cout << " [O] Toggle Orthographic/Perspective" << std::endl;
     std::cout << " [E] Export EXACT Analysis (Best)" << std::endl;
     std::cout << " [F] Export SDF/Grid Analysis (Experiment)" << std::endl;
@@ -352,14 +375,15 @@ int main() {
     glEnable(GL_PROGRAM_POINT_SIZE);
 
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
+        // glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
+        glClearColor(0.25f, 0.25f, 0.25f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float camX = sin(glm::radians(yaw)) * cos(glm::radians(pitch)) * radius;
         float camY = sin(glm::radians(pitch)) * radius;
         float camZ = cos(glm::radians(yaw)) * cos(glm::radians(pitch)) * radius;
         glm::mat4 view = glm::lookAt(glm::vec3(camX, camY, camZ), glm::vec3(0,0,0), glm::vec3(0,1,0));
-        
+        glUniform3f(glGetUniformLocation(prog, "viewPos"), camX, camY, camZ);
         glm::mat4 projection;
         if (useOrtho) {
             float aspect = 800.0f / 600.0f;
@@ -377,17 +401,33 @@ int main() {
         glUniformMatrix4fv(glGetUniformLocation(prog, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(prog, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
 
+        // Look for colors
         if(!showVoxels) {
             glUniform3f(glGetUniformLocation(prog, "objectColor"), 0.5f, 0.7f, 0.9f);
-            glBindVertexArray(VAO); glDrawArrays(GL_TRIANGLES, 0, renderVertices.size() / 3);
+            
+            // --- NEW WIREFRAME LOGIC ---
+            if (showWireframe) {
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // Draw lines only
+            } else {
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // Draw solid faces
+            }
+            // ---------------------------
+
+            glBindVertexArray(VAO); 
+            glDrawArrays(GL_TRIANGLES, 0, renderVertices.size() / 3);
+            
+            // Reset to FILL mode so it doesn't accidentally affect other things later
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); 
+
         } else {
-            glPointSize(8.0f);
-            glUniform3f(glGetUniformLocation(prog, "objectColor"), 1.0f, 0.5f, 0.0f);
+            glPointSize(10.0f);
+            glUniform3f(glGetUniformLocation(prog, "objectColor"), 0.0f, 1.0f, 1.0f);
             glBindVertexArray(vVAO); glDrawArrays(GL_POINTS, 0, voxelVertices.size() / 3);
         }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
-    glfwTerminate(); return 0;
+    glfwTerminate(); 
+    return 0;
 }
